@@ -1,0 +1,11 @@
+# Default sdkconfig for ESP32-C3 CAN Base project
+CONFIG_IDF_TARGET="esp32c3"
+
+# Enable TWAI (CAN) driver
+CONFIG_SOC_TWAI_SUPPORTED=y
+
+# Use USB Serial/JTAG for console output (ESP32-C3 built-in USB)
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# FreeRTOS tick rate – 1 kHz gives 1 ms resolution for vTaskDelay
+CONFIG_FREERTOS_HZ=1000
