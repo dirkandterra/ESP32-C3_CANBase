@@ -66,9 +66,14 @@
 #define J1939_NAME_ARBI_ADDR        1        /* must be 1 to self-configure */
 
 /* ── TX demo ─────────────────────────────────────────────────────────────── */
-#define TX_INTERVAL_MS  500
+#define TX_INTERVAL_MS  250
+
+#define BUTTON_GPIO GPIO_NUM_9
 
 static const char *TAG = "CAN";
+
+int16_t CANPositionActual = 32768;
+int16_t CANPositionCommand = 0;
 
 /* Our claimed source address, set by j1939_address_claim(). */
 static volatile uint8_t g_sa = J1939_ADDR_NULL;
@@ -228,11 +233,14 @@ static void can_rx_task(void *arg)
         }
 
         if (msg.extd) {
-            ESP_LOGI(TAG, "RX  ID=0x%08lX [ext] DLC=%d",
-                     (unsigned long)msg.identifier, msg.data_length_code);
-        } else {
-            ESP_LOGI(TAG, "RX  ID=0x%03lX [std] DLC=%d",
-                     (unsigned long)msg.identifier, msg.data_length_code);
+            if(((msg.identifier >> 16) & 0xFF) == 0xFE &&
+                ((msg.identifier >>  8) & 0xFF) == 0x45 &&
+                (msg.identifier        & 0xFF) == g_sa) { 
+                CANPositionCommand = (int16_t)((msg.data[1] << 8) | msg.data[0]); /* store the position from the CAN message */
+            }else{
+                ESP_LOGI(TAG, "RX %d",
+                     CANPositionCommand);
+            }
         }
         if (!msg.rtr) {
             for (int i = 0; i < msg.data_length_code; i++) {
@@ -258,9 +266,9 @@ static void can_tx_task(void *arg)
 
         /*
          * Proprietary B broadcast frame (PGN 0xFF00, PDU2).
-         * CAN ID = Priority(6) | PF(0xFF) | PS(0x00) | SA
+         * CAN ID = Priority(6) | PF(0xFE) | PS(0x45) | SA
          */
-        uint32_t can_id = (6UL << 26) | (0xFFUL << 16) | (0x00UL << 8) | g_sa;
+        uint32_t can_id = (6UL << 26) | (0xFEUL << 16) | (0x45UL << 8) | g_sa;
 
         twai_message_t msg = {
             .identifier       = can_id,
@@ -271,13 +279,14 @@ static void can_tx_task(void *arg)
             .dlc_non_comp     = 0,
             .data_length_code = 8,
         };
-        msg.data[0] = counter++;
-        msg.data[1] = 0xCA;
-        msg.data[2] = 0xFE;
-        msg.data[3] = 0xBE;
-        msg.data[4] = 0xEF;
-        msg.data[5] = 0xDE;
-        msg.data[6] = 0xAD;
+
+        msg.data[0] = (uint16_t)CANPositionCommand & 0xFF; /* store the position from the CAN message */
+        msg.data[1] = (uint16_t)CANPositionCommand >> 8;
+        msg.data[2] = 0x00;
+        msg.data[3] = 0x00;
+        msg.data[4] = 0x00;
+        msg.data[5] = 0x00;
+        msg.data[6] = 0x00;
         msg.data[7] = 0x00;
 
         if (twai_transmit(&msg, pdMS_TO_TICKS(100)) == ESP_OK) {
@@ -287,6 +296,31 @@ static void can_tx_task(void *arg)
         }
 
         vTaskDelay(pdMS_TO_TICKS(TX_INTERVAL_MS));
+    }
+}
+
+static void can_button_task(void *arg)
+{
+    bool lastButtonState = 1; // Assuming the button is not pressed initially (active low)
+    int16_t CanMove = 100;
+    while (1) {
+        if (gpio_get_level(BUTTON_GPIO) == 0 && lastButtonState == 1) { // Button is pressed (active low)
+            lastButtonState = 0; // Button is pressed
+            CANPositionCommand += CanMove;
+            if(CANPositionCommand >= 3150) {
+                CANPositionCommand = 3150;
+                CanMove = -100;            
+            }
+            if(CANPositionCommand <= 0) {
+                CANPositionCommand = 0;
+                CanMove = 100;            
+            }
+            ESP_LOGI(TAG, "CAN Cmd: %d", CANPositionCommand);
+            vTaskDelay(pdMS_TO_TICKS(250));
+        }else{
+            lastButtonState = 1; // Button is released
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -306,6 +340,17 @@ void app_main(void)
     ESP_ERROR_CHECK(twai_start());
     ESP_LOGI(TAG, "TWAI started at 250 kbps (TX=GPIO%d, RX=GPIO%d)", CAN_TX_GPIO, CAN_RX_GPIO);
 
+    /* Init button*/
+
+        // Zero-initialize the configuration structure
+    gpio_config_t io_conf = {};
+    io_conf.intr_type = GPIO_INTR_DISABLE;      // Disable interrupt
+    io_conf.mode = GPIO_MODE_INPUT;             // Set as input mode
+    io_conf.pin_bit_mask = (1ULL << BUTTON_GPIO);   // Bit mask of the pins to set
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    gpio_config(&io_conf);
+
     /* Derive a unique 21-bit identity number from the last 3 bytes of the MAC */
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -321,4 +366,5 @@ void app_main(void)
 
     xTaskCreate(can_rx_task, "can_rx", 3072, NULL, 6, NULL);
     xTaskCreate(can_tx_task, "can_tx", 3072, NULL, 5, NULL);
+    xTaskCreate(can_button_task, "can_button", 2048, NULL, 4, NULL);
 }
